@@ -1,0 +1,145 @@
+package archive
+
+import (
+	"archive/tar"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+)
+
+// TarCompressor handles TAR archive creation and extraction.
+type TarArchiver struct{}
+
+// NewTarCompressor creates a new TarCompressor instance.
+func NewTarArchiver() Archiver {
+	return &TarArchiver{}
+}
+
+func (t *TarArchiver) Format() string {
+	return ArchiveTAR.String()
+}
+
+// Compress creates a .tar archive of the source in targetDir.
+// Returns the full path to the final .tar file.
+func (t *TarArchiver) Compress(source string, targetDir string) (string, error) {
+	if err := os.MkdirAll(targetDir, 0755); err != nil {
+		return "", fmt.Errorf("failed to create target directory: %w", err)
+	}
+
+	tempTar := filepath.Join(targetDir, filepath.Base(source)+".tmp.tar")
+	if err := t.createTar(source, tempTar); err != nil {
+		return "", err
+	}
+
+	finalTar := filepath.Join(targetDir, filepath.Base(source)+".tar")
+	if err := os.Rename(tempTar, finalTar); err != nil {
+		return "", fmt.Errorf("failed to finalize tar file: %w", err)
+	}
+
+	return finalTar, nil
+}
+
+// createTar walks the source and writes all files + dirs into a TAR archive.
+func (t *TarArchiver) createTar(source, targetPath string) error {
+	file, err := os.Create(targetPath)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	tw := tar.NewWriter(file)
+	defer tw.Close()
+
+	return filepath.Walk(source, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+
+		header, err := tar.FileInfoHeader(info, info.Name())
+		if err != nil {
+			return err
+		}
+
+		relPath, err := filepath.Rel(source, path)
+		if err != nil {
+			return err
+		}
+
+		// Use linux-like slashes inside tar; required for portability
+		header.Name = filepath.ToSlash(relPath)
+
+		if err := tw.WriteHeader(header); err != nil {
+			return err
+		}
+
+		if info.IsDir() {
+			return nil
+		}
+
+		f, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+
+		_, err = io.Copy(tw, f)
+		return err
+	})
+}
+
+// UnCompress extracts a .tar archive (sourceTar) into targetDir.
+// Returns the path to the extracted root directory.
+func (t *TarArchiver) Decompress(sourceTar string, targetDir string) (string, error) {
+	file, err := os.Open(sourceTar)
+	if err != nil {
+		return "", fmt.Errorf("failed to open tar file: %w", err)
+	}
+	defer file.Close()
+
+	if err := os.MkdirAll(targetDir, 0755); err != nil {
+		return "", fmt.Errorf("failed to create target directory: %w", err)
+	}
+
+	tr := tar.NewReader(file)
+
+	for {
+		header, err := tr.Next()
+		if err == io.EOF {
+			break // done
+		}
+
+		if err != nil {
+			return "", fmt.Errorf("failed to read tar entry: %w", err)
+		}
+
+		targetPath := filepath.Join(targetDir, header.Name)
+
+		switch header.Typeflag {
+
+		case tar.TypeDir:
+			if err := os.MkdirAll(targetPath, os.FileMode(header.Mode)); err != nil {
+				return "", fmt.Errorf("failed to create directory: %w", err)
+			}
+
+		case tar.TypeReg:
+			if err := os.MkdirAll(filepath.Dir(targetPath), 0755); err != nil {
+				return "", err
+			}
+
+			outFile, err := os.OpenFile(targetPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, os.FileMode(header.Mode))
+			if err != nil {
+				return "", err
+			}
+
+			if _, err := io.Copy(outFile, tr); err != nil {
+				outFile.Close()
+				return "", fmt.Errorf("failed writing file: %w", err)
+			}
+
+			outFile.Close()
+		}
+	}
+
+	return targetDir, nil
+}
