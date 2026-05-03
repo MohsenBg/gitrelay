@@ -33,4 +33,6 @@ go.work.sum
 
 
 # Project
-./downloads
+downloads
+dist
+
